@@ -18,6 +18,7 @@ struct spinlock pid_lock;
 extern void forkret(void);
 static void freeproc(struct proc *p);
 
+
 extern char trampoline[]; // trampoline.S
 
 // helps ensure that wakeups of wait()ing
@@ -322,6 +323,14 @@ fork(void)
   np->state = RUNNABLE;
   release(&np->lock);
 
+  for(int i=0;i<16;i++){
+    if(p->vma[i].length){
+      memmove(&(np->vma[i]), &(p->vma[i]), sizeof(struct VMA));
+      filedup(p->vma[i].file);
+
+    }
+    else np->vma[i].length = 0;
+  }
   return pid;
 }
 
@@ -350,7 +359,16 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
-
+for(int i = 0; i < 16; i++) {
+    struct VMA *v = &(p->vma[i]);
+    if(v->length != 0){
+        if(v->flags & 1)//MAP_SHARED =0x01
+        filewrite_offset(v->file,v->start,v->length,v->offset);// need to writeback either
+        
+        uvmunmap(p->pagetable, v->start, v->length/PGSIZE, 1);
+        v->length = 0;
+    }
+}
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){

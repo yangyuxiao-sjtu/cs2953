@@ -503,3 +503,112 @@ sys_pipe(void)
   }
   return 0;
 }
+int is_mmap(struct proc *p, uint64 addr){
+  for(int i=0;i<16;i++){//handle page fault
+    struct VMA *v = &(p->vma[i]);
+    if(v->length != 0 && addr<v->end &&addr >=v->start){
+      uint start  = PGROUNDDOWN(addr);
+      uint64 offset = start - v->start + v->offset;//因为start roundworm了，因此文件offset也要随之改变
+      char * mem = kalloc();
+      if(!mem)return 0;
+      memset(mem,0,PGSIZE);
+      if(mappages(p->pagetable, start, PGSIZE, (uint64)mem, (v->port <<1)|PTE_U|PTE_V )!=0){//port 和 PTE
+        kfree(mem);
+        return 0;
+      }
+      ilock(v->file->ip);
+      readi(v->file->ip,1,start,offset,PGSIZE);
+      iunlock(v->file->ip);
+      return 1;
+
+    }
+  }
+  return 0;
+}
+// kernel/sysfile.c
+uint64 sys_mmap(void){
+    int length, prot, flags, fd;
+    argint(1, &length);
+    argint(2, &prot);
+    argint(3, &flags);
+    argint(4, &fd);
+    struct file* f = myproc()->ofile[fd];
+    if(f->writable==0 && (prot & PROT_WRITE) && (flags & MAP_SHARED))// 注意判断是不是能写的
+        return -1;
+
+    struct proc* p = myproc();
+    for(int i = 0; i < 16; ++i) {
+        struct VMA* v = &(p->vma[i]);
+        if(v->length == 0) {
+            v->length = length;
+            v->start = p->sz;//放到最上面 并不断增长
+            v->port = prot;
+            v->flags = flags;
+            v->offset = 0;
+            v->file = filedup(f); 
+            length = PGROUNDUP(length);
+            p->sz += length;
+            v->end = p->sz;
+            return v->start;
+        }
+    }
+    return -1;
+}
+int filewrite_offset(struct file *f,uint64 addr,int n,int offset){
+  int r,ret=0;
+  if(f->writable==0)return -1;
+  if(f->type != FD_INODE){
+    panic("filewrite error!");
+  }
+  int maxx=((MAXOPBLOCKS - 1 -1 -2)/ 2 )*BSIZE;
+  int i=0;
+  while(i < n){
+    int num= n- i;//剩下要写的byte量
+    if(num > maxx)num = maxx;//不能超过最大能写的
+    begin_op();
+    ilock((f->ip));
+    if((r=writei(f->ip, 1, addr+i, offset, num))>0)
+      offset+=r;
+    iunlock((f->ip));
+    end_op();
+    if(r!= num )break;
+    i+=r;
+  }
+  ret = (i==n?n:-1);
+  return ret;
+}
+
+uint64 sys_munmap(void){
+  uint64 addr;
+  int length;
+  argaddr(0, &addr);
+  argint(1, &length);
+  int closed,offset;
+  struct proc * p =myproc();
+  for(int i=0;i<16;i++){
+    struct VMA *v =&(p->vma[i]);
+    if(v->length!=0 &&addr<v->end&& addr >=v->start){
+      closed = 0;
+      offset = v->offset; 
+      length = PGROUNDUP(length);
+      addr = PGROUNDDOWN(addr);
+     
+      if(addr == v->start){
+        if(length ==v->length)closed=1;//此时关闭文件
+        v->start+=length;
+        v->length-=length;
+        v->offset+=length;
+
+      }
+      else{
+          v->length-=length;
+      }
+      if(v->flags & MAP_SHARED){//写回
+        filewrite_offset(v->file,addr,length,offset);
+      }
+      uvmunmap(p->pagetable, addr, length/PGSIZE, 1);//解除映射
+      if(closed)fileclose(v->file);
+    }
+  }
+  return 0;
+}
