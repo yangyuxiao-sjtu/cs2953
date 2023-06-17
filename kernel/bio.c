@@ -22,7 +22,8 @@
 #include "defs.h"
 #include "fs.h"
 #include "buf.h"
-
+#include "defs.h"
+extern char end[];
 struct {
   struct spinlock lock;
   struct buf buf[NBUF];
@@ -64,7 +65,7 @@ bget(uint dev, uint blockno)
 
   // Is the block already cached?
   for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
+    if(b->dev == dev && b->blockno == blockno && b->ismmaped ==0){
       b->refcnt++;
       release(&bcache.lock);
       acquiresleep(&b->lock);
@@ -87,7 +88,25 @@ bget(uint dev, uint blockno)
   }
   panic("bget: no buffers");
 }
+struct buf*
+bget_new(uint dev, uint blockno)
+{
+  struct buf *b;
 
+  acquire(&bcache.lock);
+  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+    if(b->refcnt == 0 && b->ismmaped==0) {
+      b->dev = dev;
+      b->blockno = blockno;
+      b->valid = 0;
+      b->refcnt = 1;
+      release(&bcache.lock);
+      acquiresleep(&b->lock);
+      return b;
+    }
+  }
+  panic("bget: no buffers");
+}
 // Return a locked buf with the contents of the indicated block.
 struct buf*
 bread(uint dev, uint blockno)
@@ -95,6 +114,19 @@ bread(uint dev, uint blockno)
   struct buf *b;
 
   b = bget(dev, blockno);
+  if(!b->valid) {
+    virtio_disk_rw(b, 0);
+    b->valid = 1;
+  }
+  return b;
+}
+
+struct buf*
+bread_new(uint dev, uint blockno)
+{
+  struct buf *b;
+
+  b = bget_new(dev, blockno);
   if(!b->valid) {
     virtio_disk_rw(b, 0);
     b->valid = 1;
@@ -123,7 +155,7 @@ brelse(struct buf *b)
 
   acquire(&bcache.lock);
   b->refcnt--;
-  if (b->refcnt == 0) {
+  if (b->refcnt == 0 && b->ismmaped ==0) {
     // no one is waiting for it.
     b->next->prev = b->prev;
     b->prev->next = b->next;
@@ -150,4 +182,42 @@ bunpin(struct buf *b) {
   release(&bcache.lock);
 }
 
+int handle_buf_cached(pagetable_t pg, uint64 va){
 
+  if ((va % PGSIZE) != 0)
+    panic("handle_buf not aligned!");
+  pte_t *pte;
+  struct buf *b;
+  uint64 pa;
+  if ((pte = walk(pg, va, 0))) {
+    if (PTE_FLAGS(*pte) == PTE_V) {
+      panic("handle_buf not leaf");
+    }
+    pa = PTE2PA(*pte);
+    // printf("HIHIHIHIHIHI");
+    acquire(&bcache.lock);
+    for (b = bcache.head.next; b != &bcache.head; b = b->next) {
+      if (((uint64)b->data <= pa) && ((uint64)b->data + BSIZE) > pa) {
+        b->ismmaped = 0;
+        // printf("FFFFFFFFFFFFFFF");
+        //  if(holding(&b->lock.lk))printf("DDDDDDDDDD");
+        b->refcnt++;
+        // if(holdingsleep(&b->lock)==0)acquiresleep(&b->lock);
+        release(&bcache.lock);
+        acquiresleep(&b->lock);
+        brelse(b);
+        // printf("mmmm");
+        *pte =0;
+        return 1;
+      }
+    }
+ 
+    release(&bcache.lock);
+
+    // printf("%p", pa);
+    // printf("enene%p", end);
+  }
+  // printf("SSSSSSSSS");
+
+  return 0;
+}

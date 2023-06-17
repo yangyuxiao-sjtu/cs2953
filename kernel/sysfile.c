@@ -14,8 +14,9 @@
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
+#include "buf.h"
 #include "fcntl.h"
-
+#define min(a, b) ((a) < (b) ? (a) : (b))
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -506,22 +507,34 @@ sys_pipe(void)
 int is_mmap(struct proc *p, uint64 addr){
   for(int i=0;i<16;i++){//handle page fault
     struct VMA *v = &(p->vma[i]);
+     
     if(v->length != 0 && addr<v->end &&addr >=v->start){
       uint start  = PGROUNDDOWN(addr);
-      uint64 offset = start - v->start + v->offset;//因为start roundworm了，因此文件offset也要随之改变
-      char * mem = kalloc();
-      if(!mem)return 0;
-      memset(mem,0,PGSIZE);
-      if(mappages(p->pagetable, start, PGSIZE, (uint64)mem, (v->port <<1)|PTE_U|PTE_V )!=0){//port 和 PTE
-        kfree(mem);
-        return 0;
-      }
+      uint64 offset = start - v->start + v->offset;//因为start rounddown了，因此文件offset也要随之改变
       ilock(v->file->ip);
-      readi(v->file->ip,1,start,offset,PGSIZE);
+      struct buf *bp;
+      struct inode * ip = v->file->ip;
+      uint64 dst= start;
+      uint off = offset;
+      uint n =PGSIZE;
+      if (off > ip->size || off + n < off)
+        return 0;
+      if (off + n > ip->size)
+        n = ip->size - off;
+      uint addr = bmap(ip, off / BSIZE);
+      if (addr == 0)return 0;
+      bp = bread_new(ip->dev, addr);
+      if(mappages(p->pagetable,dst,PGSIZE, (uint64)bp->data,(v->port <<1)|PTE_U|PTE_V )!= 0 ){
+          brelse(bp);
+          return 0;
+      }
+      bp->ismmaped= 1;
+      brelse(bp);
+      
+      // readi(v->file->ip,1,start,offset,PGSIZE);
       iunlock(v->file->ip);
       return 1;
-
-    }
+      }
   }
   return 0;
 }
@@ -533,6 +546,7 @@ uint64 sys_mmap(void){
     argint(3, &flags);
     argint(4, &fd);
     struct file* f = myproc()->ofile[fd];
+  
     if(f->writable==0 && (prot & PROT_WRITE) && (flags & MAP_SHARED))// 注意判断是不是能写的
         return -1;
 
@@ -606,7 +620,15 @@ uint64 sys_munmap(void){
       if(v->flags & MAP_SHARED){//写回
         filewrite_offset(v->file,addr,length,offset);
       }
-      uvmunmap(p->pagetable, addr, length/PGSIZE, 1);//解除映射
+      for(int st =0; st<length;st +=PGSIZE){
+        
+        if(handle_buf_cached(p->pagetable,addr+st) ==0){
+        
+          uvmunmap(p->pagetable, addr+st,1, 1);//解除映射
+        }
+        
+      }
+      
       if(closed)fileclose(v->file);
     }
   }

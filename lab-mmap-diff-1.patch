@@ -1,0 +1,375 @@
+diff --git a/Makefile b/Makefile
+index 0b33893..c2154db 100644
+--- a/Makefile
++++ b/Makefile
+@@ -188,7 +188,6 @@ UPROGS=\
+ 	$U/_grind\
+ 	$U/_wc\
+ 	$U/_zombie\
+-	$U/_mmaptest\
+ 
+ 
+ 
+diff --git a/kernel/defs.h b/kernel/defs.h
+index 2bab6ff..a3c962b 100644
+--- a/kernel/defs.h
++++ b/kernel/defs.h
+@@ -184,7 +184,6 @@ void            plic_complete(int);
+ void            virtio_disk_init(void);
+ void            virtio_disk_rw(struct buf *, int);
+ void            virtio_disk_intr(void);
+-int is_mmap(struct proc*,uint64);
+-int filewrite_offset(struct file *,uint64 ,int ,int);
++
+ // number of elements in fixed-size array
+ #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
+diff --git a/kernel/file.h b/kernel/file.h
+index 56ae110..b076d1d 100644
+--- a/kernel/file.h
++++ b/kernel/file.h
+@@ -1,4 +1,3 @@
+-
+ struct file {
+   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE } type;
+   int ref; // reference count
+diff --git a/kernel/fs.h b/kernel/fs.h
+index 707731d..139dcc9 100644
+--- a/kernel/fs.h
++++ b/kernel/fs.h
+@@ -4,6 +4,7 @@
+ 
+ #define ROOTINO  1   // root i-number
+ #define BSIZE 1024  // block size
++
+ // Disk layout:
+ // [ boot block | super block | log | inode blocks |
+ //                                          free bit map | data blocks]
+diff --git a/kernel/proc.c b/kernel/proc.c
+index 0b296ca..959b778 100644
+--- a/kernel/proc.c
++++ b/kernel/proc.c
+@@ -18,7 +18,6 @@ struct spinlock pid_lock;
+ extern void forkret(void);
+ static void freeproc(struct proc *p);
+ 
+-
+ extern char trampoline[]; // trampoline.S
+ 
+ // helps ensure that wakeups of wait()ing
+@@ -323,14 +322,6 @@ fork(void)
+   np->state = RUNNABLE;
+   release(&np->lock);
+ 
+-  for(int i=0;i<16;i++){
+-    if(p->vma[i].length){
+-      memmove(&(np->vma[i]), &(p->vma[i]), sizeof(struct VMA));
+-      filedup(p->vma[i].file);
+-
+-    }
+-    else np->vma[i].length = 0;
+-  }
+   return pid;
+ }
+ 
+@@ -359,16 +350,7 @@ exit(int status)
+ 
+   if(p == initproc)
+     panic("init exiting");
+-for(int i = 0; i < 16; i++) {
+-    struct VMA *v = &(p->vma[i]);
+-    if(v->length != 0){
+-        if(v->flags & 1)//MAP_SHARED =0x01
+-        filewrite_offset(v->file,v->start,v->length,v->offset);// need to writeback either
+-        
+-        uvmunmap(p->pagetable, v->start, v->length/PGSIZE, 1);
+-        v->length = 0;
+-    }
+-}
++
+   // Close all open files.
+   for(int fd = 0; fd < NOFILE; fd++){
+     if(p->ofile[fd]){
+diff --git a/kernel/proc.h b/kernel/proc.h
+index dcdfeab..d021857 100644
+--- a/kernel/proc.h
++++ b/kernel/proc.h
+@@ -80,15 +80,7 @@ struct trapframe {
+ };
+ 
+ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+-struct VMA {
+-    uint64 start;  
+-    uint64 end;    
+-    uint64 length; 
+-    int port;   
+-    int flags;    
+-    struct file *file; 
+-    int offset;  
+-};
++
+ // Per-process state
+ struct proc {
+   struct spinlock lock;
+@@ -112,5 +104,4 @@ struct proc {
+   struct file *ofile[NOFILE];  // Open files
+   struct inode *cwd;           // Current directory
+   char name[16];               // Process name (debugging)
+-  struct VMA vma[16];
+ };
+diff --git a/kernel/syscall.c b/kernel/syscall.c
+index 4fb9baa..ed65409 100644
+--- a/kernel/syscall.c
++++ b/kernel/syscall.c
+@@ -101,8 +101,6 @@ extern uint64 sys_unlink(void);
+ extern uint64 sys_link(void);
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
+-extern uint64 sys_mmap(void);
+-extern uint64 sys_munmap(void);
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -128,8 +126,6 @@ static uint64 (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
+-[SYS_mmap]    sys_mmap,
+-[SYS_munmap]  sys_munmap,
+ };
+ 
+ void
+diff --git a/kernel/syscall.h b/kernel/syscall.h
+index e7b18d6..bc5f356 100644
+--- a/kernel/syscall.h
++++ b/kernel/syscall.h
+@@ -20,5 +20,3 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
+-#define SYS_mmap   22
+-#define SYS_munmap 23
+diff --git a/kernel/sysfile.c b/kernel/sysfile.c
+index ae077b3..16b668c 100644
+--- a/kernel/sysfile.c
++++ b/kernel/sysfile.c
+@@ -503,112 +503,3 @@ sys_pipe(void)
+   }
+   return 0;
+ }
+-int is_mmap(struct proc *p, uint64 addr){
+-  for(int i=0;i<16;i++){//handle page fault
+-    struct VMA *v = &(p->vma[i]);
+-    if(v->length != 0 && addr<v->end &&addr >=v->start){
+-      uint start  = PGROUNDDOWN(addr);
+-      uint64 offset = start - v->start + v->offset;//因为start roundworm了，因此文件offset也要随之改变
+-      char * mem = kalloc();
+-      if(!mem)return 0;
+-      memset(mem,0,PGSIZE);
+-      if(mappages(p->pagetable, start, PGSIZE, (uint64)mem, (v->port <<1)|PTE_U|PTE_V )!=0){//port 和 PTE
+-        kfree(mem);
+-        return 0;
+-      }
+-      ilock(v->file->ip);
+-      readi(v->file->ip,1,start,offset,PGSIZE);
+-      iunlock(v->file->ip);
+-      return 1;
+-
+-    }
+-  }
+-  return 0;
+-}
+-// kernel/sysfile.c
+-uint64 sys_mmap(void){
+-    int length, prot, flags, fd;
+-    argint(1, &length);
+-    argint(2, &prot);
+-    argint(3, &flags);
+-    argint(4, &fd);
+-    struct file* f = myproc()->ofile[fd];
+-    if(f->writable==0 && (prot & PROT_WRITE) && (flags & MAP_SHARED))// 注意判断是不是能写的
+-        return -1;
+-
+-    struct proc* p = myproc();
+-    for(int i = 0; i < 16; ++i) {
+-        struct VMA* v = &(p->vma[i]);
+-        if(v->length == 0) {
+-            v->length = length;
+-            v->start = p->sz;//放到最上面 并不断增长
+-            v->port = prot;
+-            v->flags = flags;
+-            v->offset = 0;
+-            v->file = filedup(f); 
+-            length = PGROUNDUP(length);
+-            p->sz += length;
+-            v->end = p->sz;
+-            return v->start;
+-        }
+-    }
+-    return -1;
+-}
+-int filewrite_offset(struct file *f,uint64 addr,int n,int offset){
+-  int r,ret=0;
+-  if(f->writable==0)return -1;
+-  if(f->type != FD_INODE){
+-    panic("filewrite error!");
+-  }
+-  int maxx=((MAXOPBLOCKS - 1 -1 -2)/ 2 )*BSIZE;
+-  int i=0;
+-  while(i < n){
+-    int num= n- i;//剩下要写的byte量
+-    if(num > maxx)num = maxx;//不能超过最大能写的
+-    begin_op();
+-    ilock((f->ip));
+-    if((r=writei(f->ip, 1, addr+i, offset, num))>0)
+-      offset+=r;
+-    iunlock((f->ip));
+-    end_op();
+-    if(r!= num )break;
+-    i+=r;
+-  }
+-  ret = (i==n?n:-1);
+-  return ret;
+-}
+-
+-uint64 sys_munmap(void){
+-  uint64 addr;
+-  int length;
+-  argaddr(0, &addr);
+-  argint(1, &length);
+-  int closed,offset;
+-  struct proc * p =myproc();
+-  for(int i=0;i<16;i++){
+-    struct VMA *v =&(p->vma[i]);
+-    if(v->length!=0 &&addr<v->end&& addr >=v->start){
+-      closed = 0;
+-      offset = v->offset; 
+-      length = PGROUNDUP(length);
+-      addr = PGROUNDDOWN(addr);
+-     
+-      if(addr == v->start){
+-        if(length ==v->length)closed=1;//此时关闭文件
+-        v->start+=length;
+-        v->length-=length;
+-        v->offset+=length;
+-
+-      }
+-      else{
+-          v->length-=length;
+-      }
+-      if(v->flags & MAP_SHARED){//写回
+-        filewrite_offset(v->file,addr,length,offset);
+-      }
+-      uvmunmap(p->pagetable, addr, length/PGSIZE, 1);//解除映射
+-      if(closed)fileclose(v->file);
+-    }
+-  }
+-  return 0;
+-}
+\ No newline at end of file
+diff --git a/kernel/sysproc.c b/kernel/sysproc.c
+index 0b30388..3b4d5bd 100644
+--- a/kernel/sysproc.c
++++ b/kernel/sysproc.c
+@@ -5,7 +5,6 @@
+ #include "memlayout.h"
+ #include "spinlock.h"
+ #include "proc.h"
+-#include "fcntl.h"
+ 
+ uint64
+ sys_exit(void)
+@@ -92,4 +91,3 @@ sys_uptime(void)
+   release(&tickslock);
+   return xticks;
+ }
+-
+diff --git a/kernel/trap.c b/kernel/trap.c
+index d0df200..512c850 100644
+--- a/kernel/trap.c
++++ b/kernel/trap.c
+@@ -33,7 +33,6 @@ trapinithart(void)
+ // handle an interrupt, exception, or system call from user space.
+ // called from trampoline.S
+ //
+-
+ void
+ usertrap(void)
+ {
+@@ -68,14 +67,7 @@ usertrap(void)
+     syscall();
+   } else if((which_dev = devintr()) != 0){
+     // ok
+-  } 
+-  else if (r_scause()==0xd || r_scause() ==  0xf){
+-    if(!is_mmap(p,r_stval())){
+-      printf("usertrap!!");
+-     p->killed = 1; 
+-    }
+-  }
+-  else {
++  } else {
+     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+     printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+     setkilled(p);
+diff --git a/kernel/vm.c b/kernel/vm.c
+index c02b479..9f69783 100644
+--- a/kernel/vm.c
++++ b/kernel/vm.c
+@@ -178,12 +178,12 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
+ 
+   for(a = va; a < va + npages*PGSIZE; a += PGSIZE){
+     if((pte = walk(pagetable, a, 0)) == 0)
+-    //   panic("uvmunmap: walk");
+-    // if((*pte & PTE_V) == 0)
+-    //   panic("uvmunmap: not mapped");
++      panic("uvmunmap: walk");
++    if((*pte & PTE_V) == 0)
++      panic("uvmunmap: not mapped");
+     if(PTE_FLAGS(*pte) == PTE_V)
+       panic("uvmunmap: not a leaf");
+-    if(do_free &&(*pte & PTE_V)!=0){
++    if(do_free){
+       uint64 pa = PTE2PA(*pte);
+       kfree((void*)pa);
+     }
+@@ -313,9 +313,8 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
+   for(i = 0; i < sz; i += PGSIZE){
+     if((pte = walk(old, i, 0)) == 0)
+       panic("uvmcopy: pte should exist");
+-    if((*pte & PTE_V) == 0)//允许这种情况出现
+-        continue;
+-      // panic("uvmcopy: page not present");
++    if((*pte & PTE_V) == 0)
++      panic("uvmcopy: page not present");
+     pa = PTE2PA(*pte);
+     flags = PTE_FLAGS(*pte);
+     if((mem = kalloc()) == 0)
+diff --git a/time.txt b/time.txt
+deleted file mode 100644
+index 62f9457..0000000
+--- a/time.txt
++++ /dev/null
+@@ -1 +0,0 @@
+-6
+\ No newline at end of file
+diff --git a/user/user.h b/user/user.h
+index d57f7af..4d398d5 100644
+--- a/user/user.h
++++ b/user/user.h
+@@ -39,5 +39,3 @@ void free(void*);
+ int atoi(const char*);
+ int memcmp(const void *, const void *, uint);
+ void *memcpy(void *, const void *, uint);
+-void* mmap(void*, int, int, int, int, int);
+-int munmap(void*, int);
+\ No newline at end of file
+diff --git a/user/usys.pl b/user/usys.pl
+index d23b9cc..01e426e 100755
+--- a/user/usys.pl
++++ b/user/usys.pl
+@@ -36,5 +36,3 @@ entry("getpid");
+ entry("sbrk");
+ entry("sleep");
+ entry("uptime");
+-entry("mmap");
+-entry("munmap");

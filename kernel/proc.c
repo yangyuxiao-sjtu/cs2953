@@ -364,8 +364,13 @@ for(int i = 0; i < 16; i++) {
     if(v->length != 0){
         if(v->flags & 1)//MAP_SHARED =0x01
         filewrite_offset(v->file,v->start,v->length,v->offset);// need to writeback either
+        uint64 addr = v->start;
+        for(int st =0; st<= v->length;st +=PGSIZE){
+        if(handle_buf_cached(p->pagetable,addr+st) ==0){
+          uvmunmap(p->pagetable, addr+st,1, 1);//解除映射
+        }
         
-        uvmunmap(p->pagetable, v->start, v->length/PGSIZE, 1);
+      }
         v->length = 0;
     }
 }

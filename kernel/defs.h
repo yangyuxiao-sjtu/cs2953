@@ -16,7 +16,7 @@ void            brelse(struct buf*);
 void            bwrite(struct buf*);
 void            bpin(struct buf*);
 void            bunpin(struct buf*);
-
+int             handle_buf_cached(pagetable_t , uint64 );
 // console.c
 void            consoleinit(void);
 void            consoleintr(int);
@@ -53,7 +53,8 @@ int             readi(struct inode*, int, uint64, uint, uint);
 void            stati(struct inode*, struct stat*);
 int             writei(struct inode*, int, uint64, uint, uint);
 void            itrunc(struct inode*);
-
+uint bmap(struct inode *, uint );
+struct buf* bread_new(uint dev, uint blockno);
 // ramdisk.c
 void            ramdiskinit(void);
 void            ramdiskintr(void);
